@@ -21,7 +21,6 @@ C_CYAN='\033[1;36m'
 C_WHITE='\033[1;37m'
 C_BOLD='\033[1m'
 
-# Ensure Database Exists
 mkdir -p /tmp
 touch "$DB_FILE"
 
@@ -30,30 +29,22 @@ check_dependencies() {
     if ! command -v sshpass &> /dev/null; then
         clear
         echo -e "${C_YELLOW}[*] 'sshpass' is missing. Auto-detecting OS to install dependencies...${C_RESET}"
-        
         if command -v pkg &> /dev/null; then
-            echo -e "${C_CYAN}[+] Termux environment detected. Installing via pkg...${C_RESET}"
             pkg update -y && pkg install sshpass -y
         elif command -v apt-get &> /dev/null; then
-            echo -e "${C_CYAN}[+] Debian/Ubuntu environment detected. Installing via apt...${C_RESET}"
             sudo apt-get update -y && sudo apt-get install sshpass -y
         elif command -v yum &> /dev/null; then
-            echo -e "${C_CYAN}[+] CentOS/RHEL environment detected. Installing via yum...${C_RESET}"
             sudo yum install sshpass -y
         elif command -v pacman &> /dev/null; then
-            echo -e "${C_CYAN}[+] Arch Linux environment detected. Installing via pacman...${C_RESET}"
             sudo pacman -Sy sshpass --noconfirm
         else
             echo -e "${C_RED}[!] Could not detect package manager. Please install 'sshpass' manually.${C_RESET}"
             exit 1
         fi
-        
-        echo -e "${C_GREEN}[SUCCESS] Dependencies installed! Launching Tunnelsmith...${C_RESET}"
         sleep 2
     fi
 }
 
-# --- Helper Functions ---
 print_header() {
     clear
     echo -e "${C_CYAN}${C_BOLD}"
@@ -72,7 +63,6 @@ pause() {
     read -r < /dev/tty
 }
 
-# --- Core Features ---
 create_tunnel() {
     echo -e "${C_CYAN}--- Create New Tunnel ---${C_RESET}"
     read -p "Enter the Local Port to forward: " LOCAL_PORT < /dev/tty
@@ -82,18 +72,16 @@ create_tunnel() {
         return 1
     fi
 
-    echo -e "${C_YELLOW}Establishing secure connection to ${REMOTE_HOST}...${C_RESET}"
-    
+    echo -e "${C_YELLOW}Establishing TRUE public connection to ${REMOTE_HOST}...${C_RESET}"
     local TMP_LOG=$(mktemp)
     
-    # Background SSH tunnel
+    # FIX 1: Added 0.0.0.0 to force public binding instead of local binding
     sshpass -p 'root' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o ConnectTimeout=15 \
-        -N -R 0:localhost:$LOCAL_PORT ${REMOTE_USER}@${REMOTE_HOST} -p ${SSH_PORT} >"$TMP_LOG" 2>&1 &
+        -N -R 0.0.0.0:0:localhost:$LOCAL_PORT ${REMOTE_USER}@${REMOTE_HOST} -p ${SSH_PORT} >"$TMP_LOG" 2>&1 &
     
     local SSH_PID=$!
     
-    # Wait for allocation
     for i in {1..20}; do
         sleep 0.5
         if grep -q "Allocated port" "$TMP_LOG" 2>/dev/null; then break; fi
@@ -108,7 +96,7 @@ create_tunnel() {
         echo -e " Forwarded Port : ${C_WHITE}localhost:$LOCAL_PORT${C_RESET}"
         echo -e " Public IP      : ${C_CYAN}${REMOTE_HOST}${C_RESET}"
         echo -e " Public Port    : ${C_CYAN}${REMOTE_PORT}${C_RESET}"
-        echo -e " Access URL     : ${C_YELLOW}http://${REMOTE_HOST}:${REMOTE_PORT}${C_RESET}"
+        echo -e " Connect Command: ${C_YELLOW}ssh <user>@${REMOTE_HOST} -p ${REMOTE_PORT}${C_RESET}"
         echo -e "---------------------------------------------------"
     else
         echo -e "\n${C_RED}[FAILED] Could not establish tunnel.${C_RESET}"
@@ -125,10 +113,8 @@ list_tunnels() {
         echo -e "${C_YELLOW}No active tunnels found.${C_RESET}"
         return
     fi
-    
     printf "${C_WHITE}%-15s | %-15s | %-10s${C_RESET}\n" "Local Port" "Public Port" "Process ID"
     echo "---------------------------------------------------"
-    
     local count=0
     while IFS=: read -r LPORT RPORT PID; do
         if ps -p "$PID" > /dev/null 2>&1; then
@@ -136,7 +122,6 @@ list_tunnels() {
             printf "%-15s | %-15s | %-10s\n" "$LPORT" "$RPORT" "$PID"
         fi
     done < "$DB_FILE"
-    
     if [[ $count -eq 0 ]]; then
         echo -e "${C_YELLOW}No active tunnels (cleared stale data).${C_RESET}"
         > "$DB_FILE"
@@ -148,14 +133,12 @@ delete_tunnel() {
     list_tunnels
     echo ""
     read -p "Enter Local Port or PID to terminate (or 'all' to kill everything): " target < /dev/tty
-    
     if [[ "$target" == "all" ]]; then
         pkill -f "ssh.*${REMOTE_HOST}"
         > "$DB_FILE"
         echo -e "${C_GREEN}All tunnels terminated.${C_RESET}"
         return
     fi
-
     local TMP=$(mktemp)
     local found=0
     while IFS=: read -r LPORT RPORT PID; do
@@ -168,37 +151,37 @@ delete_tunnel() {
         fi
     done < "$DB_FILE"
     mv "$TMP" "$DB_FILE"
-    
     [[ $found -eq 0 ]] && echo -e "${C_RED}Error: Port or PID '$target' not found.${C_RESET}"
 }
 
 setup_vps() {
     echo -e "${C_CYAN}--- VPS Initial Setup ---${C_RESET}"
-    echo -e "${C_YELLOW}Connecting to ${REMOTE_HOST} to configure GatewayPorts...${C_RESET}"
+    echo -e "${C_YELLOW}Connecting to ${REMOTE_HOST} to FORCE GatewayPorts...${C_RESET}"
     
+    # FIX 2: Aggressively overwriting sshd_config and handling multiple service names
     if sshpass -p 'root' ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} << 'EOF'
-        sed -i 's/#GatewayPorts no/GatewayPorts yes/' /etc/ssh/sshd_config
-        sed -i 's/#AllowTcpForwarding no/AllowTcpForwarding yes/' /etc/ssh/sshd_config
-        systemctl restart ssh
+        sed -i '/^GatewayPorts/d' /etc/ssh/sshd_config
+        echo "GatewayPorts yes" >> /etc/ssh/sshd_config
+        sed -i '/^AllowTcpForwarding/d' /etc/ssh/sshd_config
+        echo "AllowTcpForwarding yes" >> /etc/ssh/sshd_config
+        systemctl restart sshd || systemctl restart ssh
         ufw disable 2>/dev/null || iptables -F
 EOF
     then
-        echo -e "${C_GREEN}[SUCCESS] VPS Configured Successfully!${C_RESET}"
+        echo -e "${C_GREEN}[SUCCESS] VPS Configured Successfully! (GatewayPorts Enforced)${C_RESET}"
     else
-        echo -e "${C_RED}[FAILED] Connection failed. Please check if VPS is online.${C_RESET}"
+        echo -e "${C_RED}[FAILED] Connection failed. Check VPS status.${C_RESET}"
     fi
 }
 
-# --- Initialization ---
-check_dependencies # Auto-install missing packages
+check_dependencies
 
-# --- Main Interface Loop ---
 while true; do
     print_header
     echo -e "${C_WHITE}1.${C_RESET} Create a New Tunnel"
     echo -e "${C_WHITE}2.${C_RESET} List Active Tunnels"
     echo -e "${C_WHITE}3.${C_RESET} Delete / Kill a Tunnel"
-    echo -e "${C_WHITE}4.${C_RESET} Setup VPS ${C_RED}(Run Once)${C_RESET}"
+    echo -e "${C_WHITE}4.${C_RESET} Setup VPS ${C_RED}(CRITICAL: Run this once after update)${C_RESET}"
     echo -e "${C_WHITE}5.${C_RESET} Exit"
     echo ""
     read -p "Select an option [1-5]: " choice < /dev/tty
@@ -210,6 +193,6 @@ while true; do
         3) delete_tunnel; pause ;;
         4) setup_vps; pause ;;
         5) echo -e "${C_GREEN}Exiting Tunnelsmith. Goodbye!${C_RESET}"; exit 0 ;;
-        *) echo -e "${C_RED}Invalid option. Please try again.${C_RESET}"; sleep 1 ;;
+        *) echo -e "${C_RED}Invalid option.${C_RESET}"; sleep 1 ;;
     esac
 done
