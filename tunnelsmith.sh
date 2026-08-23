@@ -6,8 +6,8 @@
 #==============================================================================#
 
 # --- Configuration ---
-REMOTE_HOST="103.165.11.161"
-REMOTE_USER="root1"
+REMOTE_HOST="103.165.11.123"
+REMOTE_USER="root"
 SSH_PORT="22"
 DB_FILE="/tmp/tunnels.db"
 
@@ -65,9 +65,10 @@ pause() {
 
 create_tunnel() {
     echo -e "${C_CYAN}--- Create New Tunnel ---${C_RESET}"
-    read -p "Enter the Local Port to forward: " LOCAL_PORT < /dev/tty
+    read -p "Enter the LOCAL Port to forward (e.g., 22, 8080): " LOCAL_PORT < /dev/tty
+    read -p "Enter the REMOTE Port for VPS (e.g., 2222, 8080): " REMOTE_PORT < /dev/tty
 
-    if [[ ! "$LOCAL_PORT" =~ ^[0-9]+$ ]]; then
+    if [[ ! "$LOCAL_PORT" =~ ^[0-9]+$ ]] || [[ ! "$REMOTE_PORT" =~ ^[0-9]+$ ]]; then
         echo -e "${C_RED}Error: Invalid port number.${C_RESET}"
         return 1
     fi
@@ -75,33 +76,29 @@ create_tunnel() {
     echo -e "${C_YELLOW}Establishing TRUE public connection to ${REMOTE_HOST}...${C_RESET}"
     local TMP_LOG=$(mktemp)
     
-    sshpass -p 'root' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    sshpass -p '@rey1234' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o ConnectTimeout=15 \
-        -N -R 0.0.0.0:0:localhost:$LOCAL_PORT ${REMOTE_USER}@${REMOTE_HOST} -p ${SSH_PORT} >"$TMP_LOG" 2>&1 &
+        -N -R 0.0.0.0:$REMOTE_PORT:localhost:$LOCAL_PORT ${REMOTE_USER}@${REMOTE_HOST} -p ${SSH_PORT} >"$TMP_LOG" 2>&1 &
     
     local SSH_PID=$!
     
-    for i in {1..20}; do
-        sleep 0.5
-        if grep -q "Allocated port" "$TMP_LOG" 2>/dev/null; then break; fi
-        if ! ps -p "$SSH_PID" > /dev/null 2>&1; then break; fi
-    done
+    # Wait to see if process stays alive
+    sleep 2
     
-    if grep -q "Allocated port" "$TMP_LOG" 2>/dev/null; then
-        local REMOTE_PORT=$(grep "Allocated port" "$TMP_LOG" | head -n1 | grep -oE '[0-9]{4,5}')
+    if ps -p "$SSH_PID" > /dev/null 2>&1; then
         echo "$LOCAL_PORT:$REMOTE_PORT:$SSH_PID" >> "$DB_FILE"
         echo -e "\n${C_GREEN}[SUCCESS] Tunnel Established Successfully!${C_RESET}"
         echo -e "---------------------------------------------------"
         echo -e " Forwarded Port : ${C_WHITE}localhost:$LOCAL_PORT${C_RESET}"
         echo -e " Public IP      : ${C_CYAN}${REMOTE_HOST}${C_RESET}"
         echo -e " Public Port    : ${C_CYAN}${REMOTE_PORT}${C_RESET}"
-        echo -e " Connect Command: ${C_YELLOW}ssh <user>@${REMOTE_HOST} -p ${REMOTE_PORT}${C_RESET}"
+        echo -e " Connect Command: ${C_YELLOW}ssh <local_user>@${REMOTE_HOST} -p ${REMOTE_PORT}${C_RESET}"
         echo -e "---------------------------------------------------"
+        echo -e "${C_RED}[!] NOTE: Ensure Port $REMOTE_PORT is OPEN in your VPS Provider's Web Panel!${C_RESET}"
     else
         echo -e "\n${C_RED}[FAILED] Could not establish tunnel.${C_RESET}"
         echo -e "Debug Log:"
-        tail -5 "$TMP_LOG"
-        kill "$SSH_PID" 2>/dev/null
+        cat "$TMP_LOG"
     fi
     rm -f "$TMP_LOG"
 }
@@ -157,14 +154,15 @@ setup_vps() {
     echo -e "${C_CYAN}--- VPS Initial Setup ---${C_RESET}"
     echo -e "${C_YELLOW}Connecting to ${REMOTE_HOST} to FORCE GatewayPorts...${C_RESET}"
     
-    if sshpass -p 'root' ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} << 'EOF'
-        echo 'root' | sudo -S bash -c "
+    # -q hides MOTD/login banner, -p "" hides sudo prompt
+    if sshpass -p '@rey1234' ssh -q -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} << 'EOF'
+        echo '@rey1234' | sudo -S -p "" bash -c "
             sed -i '/^GatewayPorts/d' /etc/ssh/sshd_config
             echo 'GatewayPorts yes' >> /etc/ssh/sshd_config
             sed -i '/^AllowTcpForwarding/d' /etc/ssh/sshd_config
             echo 'AllowTcpForwarding yes' >> /etc/ssh/sshd_config
-            systemctl restart sshd || systemctl restart ssh
-            ufw disable 2>/dev/null || iptables -F
+            systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
+            ufw disable 2>/dev/null || iptables -F 2>/dev/null
         "
 EOF
     then
@@ -181,7 +179,7 @@ while true; do
     echo -e "${C_WHITE}1.${C_RESET} Create a New Tunnel"
     echo -e "${C_WHITE}2.${C_RESET} List Active Tunnels"
     echo -e "${C_WHITE}3.${C_RESET} Delete / Kill a Tunnel"
-    echo -e "${C_WHITE}4.${C_RESET} Setup VPS ${C_RED}(CRITICAL: Run this once after update)${C_RESET}"
+    echo -e "${C_WHITE}4.${C_RESET} Setup VPS ${C_RED}(Run this once if not done yet)${C_RESET}"
     echo -e "${C_WHITE}5.${C_RESET} Exit"
     echo ""
     read -p "Select an option [1-5]: " choice < /dev/tty
