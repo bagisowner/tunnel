@@ -34,6 +34,7 @@ EMOJI_STOP="🛑"
 EMOJI_LIST="📋"
 EMOJI_BOMB="💥"
 EMOJI_WAVE="👋"
+EMOJI_SEARCH="🔍"
 
 # --- Dependency Check ---
 check_dependencies() {
@@ -79,14 +80,39 @@ pause() {
 create_tunnel() {
     echo -e "${C_CYAN}--- ${EMOJI_GEAR} Create New Tunnel ---${C_RESET}"
     read -p "Enter LOCAL Port to forward (e.g., 8080, 22): " LOCAL_PORT < /dev/tty
-    read -p "Enter REMOTE Port for VPS (e.g., 2222, 9090): " REMOTE_PORT < /dev/tty
 
-    if [[ ! "$LOCAL_PORT" =~ ^[0-9]+$ ]] || [[ ! "$REMOTE_PORT" =~ ^[0-9]+$ ]]; then
-        echo -e "${EMOJI_ERROR} ${C_RED}Error: Invalid port numbers.${C_RESET}"
+    if [[ ! "$LOCAL_PORT" =~ ^[0-9]+$ ]]; then
+        echo -e "${EMOJI_ERROR} ${C_RED}Error: Invalid local port number.${C_RESET}"
         return 1
     fi
 
-    echo -e "\n${EMOJI_TUNNEL} ${C_BLUE}Forging a secure tunnel to ${REMOTE_HOST}...${C_RESET}"
+    echo -e "\n${EMOJI_SEARCH} ${C_YELLOW}Hunting for a free remote port on the VPS...${C_RESET}"
+    
+    local ATTEMPT=0
+    local REMOTE_PORT=0
+    
+    # Loop to generate and check random ports
+    while [ $ATTEMPT -lt 10 ]; do
+        REMOTE_PORT=$(( RANDOM % 55535 + 10000 ))
+        
+        # Checking if the port is busy on the VPS using 'ss' command
+        local PORT_IN_USE=$(sshpass -p "${VPS_PASS}" ssh -q -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${REMOTE_USER}@${REMOTE_HOST} -p ${SSH_PORT} "ss -ltn 2>/dev/null | grep -c ':${REMOTE_PORT} '")
+        
+        if [[ "$PORT_IN_USE" == "0" ]] || [[ -z "$PORT_IN_USE" ]]; then
+            echo -e "${EMOJI_SUCCESS} ${C_GREEN}Found available port: ${C_WHITE}${REMOTE_PORT}${C_RESET}"
+            break
+        else
+            echo -e "${C_YELLOW}Port ${REMOTE_PORT} is in use. Trying another one...${C_RESET}"
+        fi
+        ((ATTEMPT++))
+    done
+
+    if [ $ATTEMPT -eq 10 ]; then
+        echo -e "${EMOJI_ERROR} ${C_RED}Failed to find a free port after 10 attempts. Try again.${C_RESET}"
+        return 1
+    fi
+
+    echo -e "${EMOJI_TUNNEL} ${C_BLUE}Forging a secure tunnel to ${REMOTE_HOST}...${C_RESET}"
     
     # Run the tunnel in background
     nohup sshpass -p "${VPS_PASS}" ssh -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=60 \
@@ -104,7 +130,7 @@ create_tunnel() {
         echo -e " 💻 SSH Command  : ${C_WHITE}ssh <user>@${REMOTE_HOST} -p ${REMOTE_PORT}${C_RESET}"
         echo -e " 🌐 Web URL      : ${C_WHITE}http://${REMOTE_HOST}:${REMOTE_PORT}${C_RESET}"
         echo -e "---------------------------------------------------"
-        echo -e "${C_RED}[!] Make sure Port $REMOTE_PORT is OPEN in your VPS Dashboard/Firewall!${C_RESET}"
+        echo -e "${C_RED}[!] Make sure the range 10000-65535 is OPEN in your VPS Panel Firewall!${C_RESET}"
     else
         echo -e "${EMOJI_ERROR} ${C_RED}Failed to establish tunnel.${C_RESET}"
         echo -e "Debug Log:"
