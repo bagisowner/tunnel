@@ -25,6 +25,34 @@ C_BOLD='\033[1m'
 mkdir -p /tmp
 touch "$DB_FILE"
 
+# --- OS Detection & Auto-Installer ---
+check_dependencies() {
+    if ! command -v sshpass &> /dev/null; then
+        clear
+        echo -e "${C_YELLOW}[*] 'sshpass' is missing. Auto-detecting OS to install dependencies...${C_RESET}"
+        
+        if command -v pkg &> /dev/null; then
+            echo -e "${C_CYAN}[+] Termux environment detected. Installing via pkg...${C_RESET}"
+            pkg update -y && pkg install sshpass -y
+        elif command -v apt-get &> /dev/null; then
+            echo -e "${C_CYAN}[+] Debian/Ubuntu environment detected. Installing via apt...${C_RESET}"
+            sudo apt-get update -y && sudo apt-get install sshpass -y
+        elif command -v yum &> /dev/null; then
+            echo -e "${C_CYAN}[+] CentOS/RHEL environment detected. Installing via yum...${C_RESET}"
+            sudo yum install sshpass -y
+        elif command -v pacman &> /dev/null; then
+            echo -e "${C_CYAN}[+] Arch Linux environment detected. Installing via pacman...${C_RESET}"
+            sudo pacman -Sy sshpass --noconfirm
+        else
+            echo -e "${C_RED}[!] Could not detect package manager. Please install 'sshpass' manually.${C_RESET}"
+            exit 1
+        fi
+        
+        echo -e "${C_GREEN}[SUCCESS] Dependencies installed! Launching Tunnelsmith...${C_RESET}"
+        sleep 2
+    fi
+}
+
 # --- Helper Functions ---
 print_header() {
     clear
@@ -59,7 +87,7 @@ create_tunnel() {
     local TMP_LOG=$(mktemp)
     
     # Background SSH tunnel
-    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    sshpass -p 'root' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o ConnectTimeout=15 \
         -N -R 0:localhost:$LOCAL_PORT ${REMOTE_USER}@${REMOTE_HOST} -p ${SSH_PORT} >"$TMP_LOG" 2>&1 &
     
@@ -148,14 +176,21 @@ setup_vps() {
     echo -e "${C_CYAN}--- VPS Initial Setup ---${C_RESET}"
     echo -e "${C_YELLOW}Connecting to ${REMOTE_HOST} to configure GatewayPorts...${C_RESET}"
     
-    sshpass -p 'root' ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} << 'EOF'
+    if sshpass -p 'root' ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} << 'EOF'
         sed -i 's/#GatewayPorts no/GatewayPorts yes/' /etc/ssh/sshd_config
         sed -i 's/#AllowTcpForwarding no/AllowTcpForwarding yes/' /etc/ssh/sshd_config
         systemctl restart ssh
         ufw disable 2>/dev/null || iptables -F
 EOF
-    echo -e "${C_GREEN}[SUCCESS] VPS Configured Successfully!${C_RESET}"
+    then
+        echo -e "${C_GREEN}[SUCCESS] VPS Configured Successfully!${C_RESET}"
+    else
+        echo -e "${C_RED}[FAILED] Connection failed. Please check if VPS is online.${C_RESET}"
+    fi
 }
+
+# --- Initialization ---
+check_dependencies # Auto-install missing packages
 
 # --- Main Interface Loop ---
 while true; do
