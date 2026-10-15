@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# Dynamic Port Forwarding Manager (Background Daemon + Process Control)
-# VPS Endpoint: 103.165.11.123
+# Dynamic Port Forwarding Manager (Background Daemon + Systemd VPS Persistence)
+# VPS Endpoint: 95.135.254.211
 # ==============================================================================
 
 VPS_USER="root"
@@ -51,7 +51,7 @@ print_header() {
     clear
     echo -e "${CYAN}${BOLD}"
     echo "=========================================================="
-    echo "         FORWARDING TUNNEL MANAGER (DAEMON MODE)          "
+    echo "         FORWARDING TUNNEL MANAGER (SYSTEMD MODE)         "
     echo "                 Host: $VPS_HOST                          "
     echo "=========================================================="
     echo -e "${NC}"
@@ -63,7 +63,7 @@ spawn_tunnel() {
     local remote_port=$(get_random_port)
     local tunnel_id=$(date +%s%N | cut -b10-14)
 
-    echo -e "\n${YELLOW}[*] Spawning $proto tunnel in background...${NC}"
+    echo -e "\n${YELLOW}[*] Spawning $proto tunnel and setting up VPS systemd persistence...${NC}"
 
     case "$proto" in
         TCP)
@@ -77,26 +77,62 @@ spawn_tunnel() {
             ;;
 
         UDP)
+            # Create a permanent systemd service on the VPS for socat UDP listener so it survives reboots
+            ssh -p "$SSH_PORT" "${VPS_USER}@${VPS_HOST}" "bash -s" <<EOF
+cat << 'EOT' > /etc/systemd/system/tunnel_udp_${remote_port}.service
+[Unit]
+Description=Socat UDP Tunnel Relay for Port ${remote_port}
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat UDP-LISTEN:${remote_port},fork,reuseaddr TCP:127.0.0.1:${remote_port}
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOT
+systemctl daemon-reload
+systemctl enable tunnel_udp_${remote_port}.service
+systemctl restart tunnel_udp_${remote_port}.service
+EOF
+
             socat TCP-LISTEN:"$remote_port",bind=127.0.0.1,reuseaddr,fork UDP:127.0.0.1:"$local_port" &
             LOCAL_SOCAT_PID=$!
-
-            REMOTE_SOCAT_PID=$(ssh -p "$SSH_PORT" "${VPS_USER}@${VPS_HOST}" \
-                "nohup socat UDP-LISTEN:${remote_port},fork,reuseaddr TCP:127.0.0.1:${remote_port} >/dev/null 2>&1 & echo \$!")
 
             ssh -f -N -R "127.0.0.1:${remote_port}:127.0.0.1:${remote_port}" \
                 -p "$SSH_PORT" "${VPS_USER}@${VPS_HOST}"
 
             SSH_PID=$(pgrep -f "ssh -f -N -R 127.0.0.1:${remote_port}:127.0.0.1:${remote_port}" | tail -n 1)
 
-            echo "$tunnel_id|UDP|$local_port|$remote_port|$SSH_PID|$LOCAL_SOCAT_PID|$REMOTE_SOCAT_PID" >> "$STATE_FILE"
+            echo "$tunnel_id|UDP|$local_port|$remote_port|$SSH_PID|$LOCAL_SOCAT_PID|VPS_SYSTEMD" >> "$STATE_FILE"
             ;;
 
         BOTH)
+            # Create a permanent systemd service on the VPS for UDP side
+            ssh -p "$SSH_PORT" "${VPS_USER}@${VPS_HOST}" "bash -s" <<EOF
+cat << 'EOT' > /etc/systemd/system/tunnel_udp_${remote_port}.service
+[Unit]
+Description=Socat UDP Tunnel Relay for Port ${remote_port}
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat UDP-LISTEN:${remote_port},fork,reuseaddr TCP:127.0.0.1:${remote_port}
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOT
+systemctl daemon-reload
+systemctl enable tunnel_udp_${remote_port}.service
+systemctl restart tunnel_udp_${remote_port}.service
+EOF
+
             socat TCP-LISTEN:"$remote_port",bind=127.0.0.1,reuseaddr,fork UDP:127.0.0.1:"$local_port" &
             LOCAL_SOCAT_PID=$!
-
-            REMOTE_SOCAT_PID=$(ssh -p "$SSH_PORT" "${VPS_USER}@${VPS_HOST}" \
-                "nohup socat UDP-LISTEN:${remote_port},fork,reuseaddr TCP:127.0.0.1:${remote_port} >/dev/null 2>&1 & echo \$!")
 
             ssh -f -N \
                 -R "0.0.0.0:${remote_port}:localhost:${local_port}" \
@@ -105,11 +141,11 @@ spawn_tunnel() {
 
             SSH_PID=$(pgrep -f "0.0.0.0:${remote_port}:localhost:${local_port}" | tail -n 1)
 
-            echo "$tunnel_id|BOTH|$local_port|$remote_port|$SSH_PID|$LOCAL_SOCAT_PID|$REMOTE_SOCAT_PID" >> "$STATE_FILE"
+            echo "$tunnel_id|BOTH|$local_port|$remote_port|$SSH_PID|$LOCAL_SOCAT_PID|VPS_SYSTEMD" >> "$STATE_FILE"
             ;;
     esac
 
-    echo -e "${GREEN}${BOLD}[✔] Tunnel Started in Background!${NC}"
+    echo -e "${GREEN}${BOLD}[✔] Tunnel Active with VPS Systemd Persistence!${NC}"
     echo -e "ID         : ${BOLD}$tunnel_id${NC}"
     echo -e "Protocol   : ${BOLD}$proto${NC}"
     echo -e "Local Target: ${BOLD}127.0.0.1:$local_port${NC}"
@@ -150,10 +186,12 @@ list_and_kill_tunnels() {
             while IFS="|" read -r id proto lport rport ssh_pid local_socat_pid remote_socat_pid; do
                 kill "$ssh_pid" 2>/dev/null
                 [ "$local_socat_pid" != "NONE" ] && kill "$local_socat_pid" 2>/dev/null
-                [ "$remote_socat_pid" != "NONE" ] && ssh -p "$SSH_PORT" "${VPS_USER}@${VPS_HOST}" "kill $remote_socat_pid 2>/dev/null"
+                if [ "$remote_socat_pid" = "VPS_SYSTEMD" ]; then
+                    ssh -p "$SSH_PORT" "${VPS_USER}@${VPS_HOST}" "systemctl stop tunnel_udp_${rport}.service 2>/dev/null; systemctl disable tunnel_udp_${rport}.service 2>/dev/null; rm -f /etc/systemd/system/tunnel_udp_${rport}.service; systemctl daemon-reload"
+                fi
             done < "$STATE_FILE"
             > "$STATE_FILE"
-            echo -e "${RED}[✔] All background tunnels terminated.${NC}"
+            echo -e "${RED}[✔] All background tunnels terminated and VPS systemd services wiped.${NC}"
             sleep 1
             break
         else
@@ -162,7 +200,9 @@ list_and_kill_tunnels() {
                 IFS="|" read -r id proto lport rport ssh_pid local_socat_pid remote_socat_pid <<< "$matched_line"
                 kill "$ssh_pid" 2>/dev/null
                 [ "$local_socat_pid" != "NONE" ] && kill "$local_socat_pid" 2>/dev/null
-                [ "$remote_socat_pid" != "NONE" ] && ssh -p "$SSH_PORT" "${VPS_USER}@${VPS_HOST}" "kill $remote_socat_pid 2>/dev/null"
+                if [ "$remote_socat_pid" = "VPS_SYSTEMD" ]; then
+                    ssh -p "$SSH_PORT" "${VPS_USER}@${VPS_HOST}" "systemctl stop tunnel_udp_${rport}.service 2>/dev/null; systemctl disable tunnel_udp_${rport}.service 2>/dev/null; rm -f /etc/systemd/system/tunnel_udp_${rport}.service; systemctl daemon-reload"
+                fi
                 
                 grep -v "^$act|" "$STATE_FILE" > "$STATE_DIR/tmp" && mv "$STATE_DIR/tmp" "$STATE_FILE"
                 echo -e "${GREEN}[✔] Successfully terminated tunnel $act.${NC}"
